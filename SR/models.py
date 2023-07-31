@@ -1304,7 +1304,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
             torch.cuda.synchronize()
             end = timer()
 
-            pdb.set_trace() # at this moment, rgb: [1,3,6,800,800]
+            # pdb.set_trace() # at this moment, rgb: [1,3,6,800,800]
             if feat is not None:
                 feat = rgb[:, :, 3:6]
             rgb = rgb[:, :, 0:3]
