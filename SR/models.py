@@ -354,14 +354,13 @@ class NeuralSupersamplingModel(nn.Module):
         message_info = []
         infer_speedup = True
 
+        torch.cuda.synchronize()
+        time_logger.append(timer()) # start
+
         B, I, C, H, W = rgb.shape
         W_t = W * self.upsampling_factor[0]
         H_t = H * self.upsampling_factor[1]
-        #rgb_output = torch.zeros(*rgb.shape[0:3], H_t, W_t).to(rgb.device)
 
-        torch.cuda.synchronize()
-        time_logger.append(timer()) # start
-        # pdb.set_trace()
         if C==3:
             if infer_speedup:  ### assign instead of transpose_conv2d
                 rgb_temp_tensor = torch.zeros(B * I, 3, H_t, W_t, device=rgb.device)
@@ -1063,6 +1062,13 @@ class trt_NeuralSupersamplingModel(nn.Module):
 
     # warp 1,...,T frames to 0th frame
     def warp_direct(self, rgb, depth, pose, offset=None, feat=None):
+        time_logger = []
+        message_info = []
+        infer_speedup = True
+
+        torch.cuda.synchronize()
+        time_logger.append(timer()) # start
+
         B, I, C, H, W = rgb.shape
         W_t = W * self.upsampling_factor[0]
         H_t = H * self.upsampling_factor[1]
@@ -1079,21 +1085,15 @@ class trt_NeuralSupersamplingModel(nn.Module):
         rgb_output[:, 0, ..., ::4, ::4] = rgb[:, 0]
 
         torch.cuda.synchronize()
-        start = timer()
+        time_logger.append(timer())  # rgb upsampling
+        message_info.append('current frame rgb upsampling')
 
         if self.frame_num == 1:
             return rgb_output, depth_output
 
-        torch.cuda.synchronize()
-        p1 = timer()
-        # print(f"zero upsampling inference time: {(p1 - start) * 1000}ms")
-
         for i in range(1, I):
             # project 3D points of frame 0 to [1,...,T] frames
             # di_upsampled = self.depth_zero_upsampling(depth[:,i])
-            torch.cuda.synchronize()
-            t0 = timer()
-
             di = depth[:, i]
             xyz = self.unproject(di, pose[:, i], offset=offset, high_res=False)
             if False:
@@ -1112,10 +1112,15 @@ class trt_NeuralSupersamplingModel(nn.Module):
                 # import ipdb;ipdb.set_trace()
 
             torch.cuda.synchronize()
-            t1 = timer()
-            # print(f"unprojection inference time: {(t1 - t0) * 1000}ms")
+            time_logger.append(timer())  # unproject i th frame
+            message_info.append(f'unproject feature of No.{i} frame')
+
             # project to frame 0
             uv0, d0 = self.project(xyz, pose[:, 0], H, W, offset=offset, high_res=False)
+
+            torch.cuda.synchronize()
+            time_logger.append(timer())  # project i th frame
+            message_info.append(f'project point cloud of No.{i} frame')
 
             uv0_up = torch.round(uv0 * 4).to(torch.long)
             uv0 = torch.round(uv0)
@@ -1129,9 +1134,10 @@ class trt_NeuralSupersamplingModel(nn.Module):
             # uv0 = uv0.clamp(min=0, max=H-1)
             uv0_up[..., 0] = uv0_up[..., 0].clamp(min=0, max=W_t - 1)
             uv0_up[..., 1] = uv0_up[..., 1].clamp(min=0, max=H_t - 1)
+
             torch.cuda.synchronize()
-            t2 = timer()
-            # print(f"projection inference time: {(t2 - t1) * 1000}ms")
+            time_logger.append(timer())  # get warped coord.
+            message_info.append(f'get warped coord. of No.{i} frame')
 
             for k in range(rgb.shape[0]):
                 uv_round = uv0_up
@@ -1150,8 +1156,8 @@ class trt_NeuralSupersamplingModel(nn.Module):
                 rgb_output[k:k + 1, i] = rgbi_proj
 
             torch.cuda.synchronize()
-            t2 = timer()
-            # print(f"round & assign inference time: {(t2 - t1) * 1000}ms")
+            time_logger.append(timer())  # get warped coord.
+            message_info.append(f'copy feature from No.{i} frame')
 
             # uv1 = uv1.view(-1, H_t, W_t, 2).clone()
             # uv1[..., 0] = 2 * (uv1[..., 0] / (W_t-1) - 0.5)
@@ -1167,9 +1173,9 @@ class trt_NeuralSupersamplingModel(nn.Module):
             # rgb_output[:,i] = rgb10
             # depth_output[:,i] = d10
 
-        # torch.cuda.synchronize()
-        # p2 = timer()
-        # print(f"warping(inside) inference time: {(p2 - p1) * 1000}ms")
+        for i in range(len(time_logger)-1):
+            print(f'{message_info[i]}: {(time_logger[i+1] - time_logger[i])*1e3} ms')
+
         return rgb_output, depth_output
 
     '''
@@ -1298,6 +1304,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
             torch.cuda.synchronize()
             end = timer()
 
+            pdb.set_trace() # at this moment, rgb: [1,3,6,800,800]
             if feat is not None:
                 feat = rgb[:, :, 3:6]
             rgb = rgb[:, :, 0:3]
@@ -1316,16 +1323,9 @@ class trt_NeuralSupersamplingModel(nn.Module):
                 plt.show()
 
             rgb = rgb.reshape([B, -1, *rgb.shape[-2:]])
-            # pdb.set_trace()
             if feat is not None:
                 feat = feat.reshape([B, -1, *rgb.shape[-2:]])
                 rgb = torch.cat((rgb, feat), dim=1)
-
-            ## batch test
-
-            # rgb = rgb.repeat(1, 1, 1, 1)
-            # rgb_up = rgb_up.repeat(1, 1, 1, 1)
-            # pdb.set_trace()
 
             torch.cuda.synchronize()
             network_start = timer()

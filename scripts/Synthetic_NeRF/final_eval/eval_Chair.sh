@@ -18,7 +18,7 @@ python train.py \
     --training_stage End2End \
     --complete_pipeline --direct_E2E \
     --val_only --TRT_enable \
-    --TRT_engine_file ./ckpts/nsvf/$NAME/End2End_direct/unet_fp16_$NAME.engine \
+    --TRT_engine_file ./ckpts/nsvf/$NAME/End2End_direct/unet_int8_$NAME.engine \
     --ckpt_path ./ckpts/nsvf/$NAME/End2End_direct/epoch=299_slim_feat.ckpt
     # --save_traj_img
 

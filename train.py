@@ -756,12 +756,6 @@ class NeRFSystem(LightningModule):
             return logs
 
     def validation_epoch_end(self, outputs):
-        # print(sum(self.t)/len(self.t))
-        # pdb.set_trace()
-        # print(f"num of val frame:{len(outputs)}")
-        # print(f"{self.elapsed_time_ms/(len(outputs))}ms/frame")
-        # pdb.set_trace()
-
         nerf_t = [x['nerf_t'] for x in outputs]
         net_t = [x['net_t'] for x in outputs]
         print('neural_fields_mean_t:', sum(nerf_t) / len(nerf_t) * 1e3, 'ms')
@@ -792,7 +786,10 @@ class NeRFSystem(LightningModule):
 
             result_filename = os.path.join(self.logger.root_dir, f"version_{self.logger.version}", 'results.txt')
             with open(result_filename, 'a+') as f:
-                f.write(f"{mean_psnr} {mean_ssim} {mean_lpips} \n")
+                text_message = f"{mean_psnr} {mean_ssim} "
+                if self.hparams.eval_lpips:
+                    text_message += f"{mean_lpips}"
+                f.write(f"{text_message}" + "\n")
 
 
     def on_test_start(self) -> None:
