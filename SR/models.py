@@ -754,6 +754,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
 
         # initialize camera ray for warping
         if K is not None:
+            pdb.set_trace()
             self.K = K.view(-1, 3, 3).to(torch.float32)
             Ki = torch.inverse(K)
 
@@ -824,7 +825,6 @@ class trt_NeuralSupersamplingModel(nn.Module):
 
     def get_ray(self, im_height, im_width, offset, high_res=False):
         K = self.get_K(im_height, im_width, offset, high_res)
-        # pdb.set_trace()
         B = offset.shape[0]
 
         if high_res:
@@ -849,26 +849,39 @@ class trt_NeuralSupersamplingModel(nn.Module):
         return ray.reshape(B, -1, 3).to(torch.float32)
 
     def unproject(self, depth, pose, offset=None, high_res=False):
-        # torch.cuda.synchronize()
-        # start = timer()
-        ray = self.get_ray(depth.shape[-2], depth.shape[-1], offset, high_res)
-        # torch.cuda.synchronize()
-        # end = timer()
-        # print(f"get ray:{(end - start)*1000}")
-        # if offset is not None:
-        #     import ipdb;ipdb.set_trace()
-        # if not high_res:
-        #     ray = self.ray.to(depth.device)
-        # else:
-        #     ray = self.ray_highres.to(depth.device)
-        bs = depth.shape[0]
-        # pdb.set_trace()
-        xyz = depth.reshape(bs, -1, 1) * ray
+        # ray = self.get_ray(depth.shape[-2], depth.shape[-1], offset, high_res) # old version
+        # ray = self.ray # speed up
+        # print("========unproject===========")
+        # time_logger = []
+        # message_info = []
+        # infer_speedup = True
 
+        # torch.cuda.synchronize()
+        # time_logger.append(timer()) # start
+
+        bs = depth.shape[0]
+        # xyz = depth.reshape(bs, -1, 1) * ray # old version
+        xyz = depth.reshape(bs, -1, 1) * self.ray
+
+        # torch.cuda.synchronize()
+        # time_logger.append(timer())  # rgb upsampling
+        # message_info.append('x depth')
+        # pdb.set_trace()
         # c2w
-        xyz = torch.cat((xyz, torch.ones_like(xyz[..., -1:])), -1)
-        xyz = (pose @ xyz.transpose(1, 2)).transpose(1, 2)
+        # old version
+        # xyz = torch.cat((xyz, torch.ones_like(xyz[..., -1:])), -1)
+        self.xyz[...,:3] = xyz
+        xyz = (pose @ self.xyz.transpose(1, 2)).transpose(1, 2)
         xyz = xyz[..., 0:3]
+
+        # torch.cuda.synchronize()
+        # time_logger.append(timer())  # rgb upsampling
+        # message_info.append(' c2w ')
+
+        # for i in range(len(time_logger)-1):
+        #     print(f'{message_info[i]}: {(time_logger[i+1] - time_logger[i])*1e3} ms')
+        #
+        # print("===================")
 
         return xyz
 
@@ -883,26 +896,26 @@ class trt_NeuralSupersamplingModel(nn.Module):
         plt.show()
 
     def project(self, xyz, pose, im_height, im_width, offset, high_res=False):
-        # if not high_res:
-        #     K = self.K.to(xyz.device)
-        # else:
-        #     K = self.K_highres.to(xyz.device)
-        K = self.get_K(im_height, im_width, offset, high_res)
-        bs = xyz.shape[0]
+        # old version
+        # K = self.get_K(im_height, im_width, offset, high_res)
+        # speed up
+        K = self.K_highres if high_res else self.K
 
         # w2c
         xyz = torch.cat((xyz, torch.ones_like(xyz[..., -1:])), -1)
 
+        # old version
         pose_inv = torch.clone(pose)
         pose_inv[:, :3, :3] = pose[:, :3, :3].transpose(1, 2)
         pose_inv[:, :3, 3:] = -pose[:, :3, :3].transpose(1, 2) @ pose[:, :3, 3:]
         xyz = (pose_inv @ xyz.transpose(1, 2)).transpose(1, 2)
-        # xyz = (torch.inverse(pose) @ xyz.transpose(1,2)).transpose(1,2)
 
         xyz = xyz[..., 0:3]
 
         Kt = K.transpose(1, 2)
-        uv = torch.bmm(xyz, Kt)
+        # old version
+        # uv = torch.bmm(xyz, Kt)
+        uv = xyz @ Kt
 
         d = uv[:, :, 2:3]
 
@@ -984,15 +997,10 @@ class trt_NeuralSupersamplingModel(nn.Module):
         for i in range(1, I):
             # project 3D points of frame 0 to [1,...,T] frames
             # di_upsampled = self.depth_zero_upsampling(depth[:,i])
-            torch.cuda.synchronize()
-            t0 = timer()
-            # pdb.set_trace()
+
             di_upsampled = depth_output[:, i]
             xyz = self.unproject(di_upsampled, pose[:, i], offset=offset, high_res=True)
 
-            torch.cuda.synchronize()
-            t1 = timer()
-            # print(f"unprojection inference time: {(t1 - t0) * 1000}ms")
             ## DEBUG
             if False:
                 d0_upsampled = self.depth_zero_upsampling(depth[:, 0])
@@ -1011,10 +1019,6 @@ class trt_NeuralSupersamplingModel(nn.Module):
             ###
             # project to frame 0
             uv0, d0 = self.project(xyz, pose[:, 0], H_t, W_t, offset=offset, high_res=True)
-
-            torch.cuda.synchronize()
-            t2 = timer()
-            # print(f"projection inference time: {(t2 - t1) * 1000}ms")
 
             uv0 = torch.round(uv0).to(torch.long)
             u_mask = torch.logical_and(uv0[..., 0] >= 0, uv0[..., 0] < W_t)
@@ -1061,6 +1065,9 @@ class trt_NeuralSupersamplingModel(nn.Module):
         return rgb_output, depth_output
 
     # warp 1,...,T frames to 0th frame
+    def reproject(self, depth, source_pose, target_pose, source_K, target_K):
+        pass
+
     def warp_direct(self, rgb, depth, pose, offset=None, feat=None):
         time_logger = []
         message_info = []
@@ -1075,12 +1082,8 @@ class trt_NeuralSupersamplingModel(nn.Module):
         if feat is not None:
             rgb = torch.cat((rgb, feat), 2)
 
-        if W_t == self.im_width:
-            rgb_output = self.rgb_output.zero_()
-            depth_output = self.depth_output.zero_()
-        else:
-            rgb_output = self.patch_rgb_output.zero_()
-            depth_output = self.patch_depth_output.zero_()
+        rgb_output = self.rgb_output.zero_()
+        # depth_output = self.depth_output.zero_()
 
         rgb_output[:, 0, ..., ::4, ::4] = rgb[:, 0]
 
@@ -1089,7 +1092,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
         message_info.append('current frame rgb upsampling')
 
         if self.frame_num == 1:
-            return rgb_output, depth_output
+            return rgb_output #, depth_output
 
         for i in range(1, I):
             # project 3D points of frame 0 to [1,...,T] frames
@@ -1116,28 +1119,41 @@ class trt_NeuralSupersamplingModel(nn.Module):
             message_info.append(f'unproject feature of No.{i} frame')
 
             # project to frame 0
-            uv0, d0 = self.project(xyz, pose[:, 0], H, W, offset=offset, high_res=False)
+            # old version
+            # uv0, d0 = self.project(xyz, pose[:, 0], H, W, offset=offset, high_res=False)
+            # speed up
+            uv0, d0 = self.project(xyz, pose[:, 0], H, W, offset=offset, high_res=True)
 
             torch.cuda.synchronize()
             time_logger.append(timer())  # project i th frame
             message_info.append(f'project point cloud of No.{i} frame')
 
-            uv0_up = torch.round(uv0 * 4).to(torch.long)
-            uv0 = torch.round(uv0)
-            u_mask = torch.logical_and(uv0[..., 0] >= 0, uv0[..., 0] < W)
-            v_mask = torch.logical_and(uv0[..., 1] >= 0, uv0[..., 1] < H)
+            # old version
+            # uv0_up = torch.round(uv0 * 4).to(torch.long)
+            # uv0 = torch.round(uv0)
+            # u_mask = torch.logical_and(uv0[..., 0] >= 0, uv0[..., 0] < W)
+            # v_mask = torch.logical_and(uv0[..., 1] >= 0, uv0[..., 1] < H)
+            # uv_mask = torch.logical_and(u_mask, v_mask)
+            # u_mask = torch.logical_and(uv0_up[..., 0] >= 0, uv0_up[..., 0] < W_t)
+            # v_mask = torch.logical_and(uv0_up[..., 1] >= 0, uv0_up[..., 1] < H_t)
+            # uv_mask_up = torch.logical_and(u_mask, v_mask)
+            # uv_mask = torch.logical_and(uv_mask, uv_mask_up)
+            # # uv0 = uv0.clamp(min=0, max=H-1)
+            # uv0_up[..., 0] = uv0_up[..., 0].clamp(min=0, max=W_t - 1)
+            # uv0_up[..., 1] = uv0_up[..., 1].clamp(min=0, max=H_t - 1)
+            # speed up
+            uv0 = torch.round(uv0).to(torch.long)
+            u_mask = torch.logical_and(uv0[...,0]>=0 , uv0[...,0]<W_t)
+            v_mask = torch.logical_and(uv0[...,1]>=0 , uv0[...,1]<H_t)
             uv_mask = torch.logical_and(u_mask, v_mask)
-            u_mask = torch.logical_and(uv0_up[..., 0] >= 0, uv0_up[..., 0] < W_t)
-            v_mask = torch.logical_and(uv0_up[..., 1] >= 0, uv0_up[..., 1] < H_t)
-            uv_mask_up = torch.logical_and(u_mask, v_mask)
-            uv_mask = torch.logical_and(uv_mask, uv_mask_up)
-            # uv0 = uv0.clamp(min=0, max=H-1)
-            uv0_up[..., 0] = uv0_up[..., 0].clamp(min=0, max=W_t - 1)
-            uv0_up[..., 1] = uv0_up[..., 1].clamp(min=0, max=H_t - 1)
+            uv0[..., 0] = uv0[..., 0].clamp(min=0, max=W_t - 1)
+            uv0[...,1] = uv0[...,1].clamp(min=0, max=H_t-1)
+            uv0_up = uv0
 
             torch.cuda.synchronize()
             time_logger.append(timer())  # get warped coord.
             message_info.append(f'get warped coord. of No.{i} frame')
+            # pdb.set_trace()
 
             for k in range(rgb.shape[0]):
                 uv_round = uv0_up
@@ -1145,7 +1161,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
                 rgbi_proj = rgb_output[k:k + 1, i]  # B,C,H,W
 
                 rgbi = rgbi.reshape(*rgbi.shape[0:2], -1)  # B,C,H,W -> B,C,H*W
-                rgbi = rgbi.permute(0, 2, 1)
+                rgbi = rgbi.permute(0, 2, 1) # B,C,H*W -> B,H*W,C
                 # import ipdb;ipdb.set_trace()
                 # rgbi_proj[0, :, uv_round[k, uv_mask[k], 1], uv_round[k, uv_mask[k], 0]] = rgbi[0, uv_mask[k]].permute(1, 0)
                 rgbi_proj[0, :, uv_round[k, :, 1], uv_round[k, :, 0]] = rgbi[0].permute(1, 0) * uv_mask.to(
@@ -1176,7 +1192,7 @@ class trt_NeuralSupersamplingModel(nn.Module):
         for i in range(len(time_logger)-1):
             print(f'{message_info[i]}: {(time_logger[i+1] - time_logger[i])*1e3} ms')
 
-        return rgb_output, depth_output
+        return rgb_output #, depth_output
 
     '''
     B: batchsize, I: frame_num
@@ -1228,8 +1244,12 @@ class trt_NeuralSupersamplingModel(nn.Module):
             self.i_low = i.to(self.K.device).unsqueeze(0).repeat(1, 1, 1)
             self.j_low = j.to(self.K.device).unsqueeze(0).repeat(1, 1, 1)
 
-            # self.rgb_output = torch.zeros(1, 3, 6, self.im_height, self.im_width).to('cuda')
-            # self.depth_output = torch.zeros(1, 3, 1, self.im_height, self.im_width).to('cuda')
+            # Initialize rays to save time
+            low_res_h, low_res_w = self.im_height // s, self.im_width // s
+            self.ray = self.get_ray(low_res_h, low_res_w, torch.zeros((1,2), device=self.K.device), False)
+            self.xyz = torch.ones((1, low_res_h*low_res_w, 4), device=self.K.device) # homogeneous coordinates (1, #rays, 3+1)
+            # pdb.set_trace()
+
 
         # pose: BxIx3x4 -> BxIx4x4
         if pose.shape[-2] == 3:
@@ -1237,72 +1257,13 @@ class trt_NeuralSupersamplingModel(nn.Module):
             line[..., -1] = 1
             pose = torch.cat((pose, line), -2)
 
-        # do the main job
-        if self.model_type == 'nss_siggraph':
-            rgb_up = self.rgb_upsample(rgb[:, 0])
-            # B, I, _, H, W = rgb.shape
-            x = torch.cat((rgb, depth / 5.), dim=2)
-            # feature extraction network
-            B, I, _, H, W = x.shape
-            x = x.reshape(B * I, -1, H, W)
-            x_feat = self.feature_extraction(x)
-            # feature upsampling & warping
-            x_feat = x_feat.reshape(B, I, -1, H, W)
-            x_feat, depth = self.warp_zero_upsampling(x_feat, depth, pose, offset)
-            H = H * self.upsampling_factor[0]
-            W = W * self.upsampling_factor[1]
-            # feature reweighting
-            if self.frame_num > 1:
-                rgbd_up = x_feat[:, :, 0:4]
-                rgbd_up = rgbd_up.reshape(B, -1, H, W)
-                x_weight = self.feature_reweighting(rgbd_up)
-                x_weight = torch.cat((torch.ones_like(x_weight[:, 0:1]), x_weight), 1)
-                x_feat = x_feat.reshape(B, I, -1, H, W)
-                x_weight = x_weight.reshape(B, I, 1, H, W)
-                x_feat = x_feat * x_weight
-            # reconstruction
-            x_feat = x_feat.reshape(B, -1, H, W)
-            reconstructed = self.model(x_feat)
-            reconstructed = reconstructed + rgb_up
-        else:
-            if self.model_type == 'nss':
-                rgb, depth = self.warp_zero_upsampling(rgb, depth, pose, offset)
-
-        # sli's temp. implementation(need to integrate with yliao's pipeline)
-        # rgbd
-        if not 'multiframe' in self.model_type:
-            if self.in_channels == 4:
-                # yliao 's implementation
-                rgbd = torch.cat((rgb, depth / 5.), dim=-3)
-                # rgbd = torch.cat((rgb, depth), dim=-3) # [B, frame_num, 'C', H, W]
-                reconstructed = self.model(rgbd)
-            else:
-                # rgb + feat
-                if feat is not None and 'feat' in self.model_type:
-                    rgb_feat = torch.cat((rgb, feat), dim=-3)
-
-                    # torch.cuda.synchronize()
-                    # start = timer()
-
-                    reconstructed = self.model(rgb_feat)
-
-                    # torch.cuda.synchronize()
-                    # print(f"rec net inference time: {(timer() - start)*1000}ms")
-                else:
-                    # pdb.set_trace()
-                    reconstructed = self.model(rgb)
-
+        # main job
         if 'multiframe' in self.model_type:
 
             B, I, _, H, W = rgb.shape
             rgb_up = self.rgb_upsample(rgb[:, 0])
 
-            torch.cuda.synchronize()
-            start = timer()
-            rgb, depth = self.warp_direct(rgb, depth, pose, offset, feat)  # rgb.shape = [B, frame_num, 'C', H, W]
-            # rgb, depth = self.warp_direct(rgb, depth, pose, offset, feat) # rgb.shape = [B, frame_num, 'C', H, W]
-            torch.cuda.synchronize()
-            end = timer()
+            rgb = self.warp_direct(rgb, depth, pose, offset, feat)  # rgb.shape = [B, frame_num, 'C', H, W]
 
             # pdb.set_trace() # at this moment, rgb: [1,3,6,800,800]
             if feat is not None:
